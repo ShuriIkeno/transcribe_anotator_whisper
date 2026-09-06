@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>話者アノテーター</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="group">
+    <h1>話者アノテーター</h1>
+    <select id="projectSel" title="収録を選択"></select>
+  </div>
+
+  <div class="group">
+    <button id="playPause" title="再生 / 一時停止 (Space)">▶</button>
+    <span id="clock" style="font-variant-numeric:tabular-nums;color:var(--muted);min-width:96px">0:00 / 0:00</span>
+    <label style="color:var(--muted);font-size:13px">速度
+      <select id="rate">
+        <option value="0.5">0.5×</option>
+        <option value="0.75">0.75×</option>
+        <option value="1" selected>1×</option>
+        <option value="1.25">1.25×</option>
+        <option value="1.5">1.5×</option>
+        <option value="2">2×</option>
+      </select>
+    </label>
+    <label style="color:var(--muted);font-size:13px" title="再生位置の行を自動で追う">
+      <input type="checkbox" id="follow" checked> 追従
+    </label>
+  </div>
+
+  <input type="range" id="seekbar" class="seekbar" min="0" max="1000" value="0" step="1" title="再生位置（ドラッグでシーク）">
+
+  <div id="roles" class="group"></div>
+
+  <div class="group" style="margin-left:auto">
+    <span id="saveState">—</span>
+    <label style="color:var(--muted);font-size:13px" title="同じ話者の連続行を結合して書き出す">
+      <input type="checkbox" id="optMerge"> 連続結合
+    </label>
+    <label style="color:var(--muted);font-size:13px" title="書き出しに時間を含める">
+      <input type="checkbox" id="optTime"> 時刻付き
+    </label>
+    <button id="undoBtn" title="直前の削除・分割・結合を取り消す (⌘Z)" disabled>元に戻す</button>
+    <button id="exportBtn" class="primary">書き出し</button>
+    <button id="resetBtn" title="トランスクリプトから作り直す（ラベルは消えます）">再読込</button>
+  </div>
+</header>
+
+<main>
+  <div id="segments"></div>
+  <div id="emptyMsg" class="empty">収録を選択してください。</div>
+</main>
+
+<footer>
+  <div class="group"><kbd>Space</kbd> 再生/停止</div>
+  <div class="group"><kbd>1</kbd>…<kbd>9</kbd> ロール付与して次へ</div>
+  <div class="group"><kbd>0</kbd> ロール解除</div>
+  <div class="group"><kbd>J</kbd>/<kbd>K</kbd> 行移動</div>
+  <div class="group"><kbd>Enter</kbd> 現在行を編集</div>
+  <div class="group"><kbd>D</kbd> 現在行を削除</div>
+  <div class="group"><kbd>←</kbd>/<kbd>→</kbd> 3秒シーク</div>
+  <div class="group"><kbd>R</kbd> 現在行を再生</div>
+</footer>
+
+<audio id="audio" preload="metadata"></audio>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

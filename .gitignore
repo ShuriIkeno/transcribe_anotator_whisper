@@ -217,6 +217,8 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 .DS_Store
-recordings/*
-model/*
+
+# 収録した音声・文字起こし・アノテーション、および Whisper モデル（コミットしない）
+recordings/
+model/
 
