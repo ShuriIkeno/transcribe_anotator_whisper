@@ -166,3 +166,76 @@ kbd {
 #toast.show { opacity: .96; }
 
 .empty { text-align: center; color: var(--muted); padding: 60px 20px; }
+
+/* --- 置換辞書パネル ------------------------------------------------ */
+/* hidden 属性より .overlay の display が強いと閉じられなくなるので、
+   属性セレクタを足して詳細度で確実に打ち消す */
+.overlay[hidden] { display: none; }
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 30, 60, .35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.overlay .panel {
+  background: var(--panel);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(20, 30, 60, .25);
+  width: min(720px, 92vw);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 18px;
+  gap: 10px;
+}
+.panel-head { display: flex; align-items: center; gap: 10px; }
+.panel-head h2 { margin: 0; font-size: 17px; white-space: nowrap; flex: none; }
+/* 辞書のパスは長くなりがちなので、折り返さず省略して1行に収める */
+.panel-head #replPath {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;      /* 末尾（ファイル名）を残して先頭を省略する */
+  text-align: left;
+}
+.panel-head button { flex: none; white-space: nowrap; }
+.muted-sm { color: var(--muted); font-size: 12px; }
+.overlay p.muted-sm { margin: 0; line-height: 1.6; }
+
+.repl-rows {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 2px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  min-height: 80px;
+}
+.repl-row { display: flex; align-items: center; gap: 8px; }
+.repl-row input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 14px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+}
+.repl-row input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.repl-row .arrow { color: var(--muted); flex: none; }
+.repl-row .hit { flex: none; font-size: 12px; color: var(--muted); min-width: 42px; text-align: right; }
+.panel-foot { display: flex; align-items: center; gap: 8px; }
+.panel-foot button { flex: none; white-space: nowrap; }
+.repl-empty { color: var(--muted); font-size: 13px; padding: 18px 4px; text-align: center; }
+
+/* 行の「辞書へ」ボタン（編集済みの行にだけ出る） */
+.ops .to-dict { color: var(--accent); }

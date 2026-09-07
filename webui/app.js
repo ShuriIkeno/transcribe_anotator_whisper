@@ -200,6 +200,12 @@ function buildSeg(seg, idx) {
   });
   row.appendChild(roleCell);
 
+  // 「辞書へ」は下の ops に入れるが、text の input ハンドラから触るので先に作る
+  const dictB = mkOp("辞書へ", "この修正を「誤→正」として置換辞書に登録する",
+                     () => registerFromRow(idx));
+  dictB.classList.add("to-dict");
+  dictB.hidden = seg.text === seg.original;   // 直した行にだけ出す
+
   const text = document.createElement("div");
   text.className = "text" + (seg.text !== seg.original ? " edited" : "");
   text.contentEditable = "true";
@@ -208,7 +214,9 @@ function buildSeg(seg, idx) {
   text.addEventListener("focus", () => setActive(idx, false));
   text.addEventListener("input", () => {
     seg.text = text.textContent;
-    text.classList.toggle("edited", seg.text !== seg.original);
+    const changed = seg.text !== seg.original;
+    text.classList.toggle("edited", changed);
+    dictB.hidden = !changed;
     scheduleSave();
   });
   row.appendChild(text);
@@ -218,7 +226,7 @@ function buildSeg(seg, idx) {
   const splitB = mkOp("分割", "カーソル位置で分割", () => splitSeg(idx));
   const mergeB = mkOp("↑結合", "上の行と結合", () => mergeUp(idx));
   const delB = mkOp("削除", "この行を削除 (D)", () => deleteSeg(idx));
-  ops.appendChild(splitB); ops.appendChild(mergeB); ops.appendChild(delB);
+  ops.appendChild(dictB); ops.appendChild(splitB); ops.appendChild(mergeB); ops.appendChild(delB);
   row.appendChild(ops);
 
   row.addEventListener("mousedown", (e) => {
@@ -468,3 +476,167 @@ $("resetBtn").addEventListener("click", async () => {
 
 // ------------------------------------------------------------------ 起動
 loadProjectList();
+
+// ------------------------------------------------------------------ 置換辞書
+// 「誤 → 正」の決定的な置換。モデルを上げても残る同音語・言い間違い・
+// 漢字の揺れを潰すためのもの。件数の上限は無い。
+let replacements = [];   // [{from, to}]
+
+/**
+ * 編集前後の文字列から、実際に変わった部分だけを取り出す。
+ * 「こちらケイト25歳です」→「内田圭人25歳です」なら {from:"こちらケイト", to:"内田圭人"}。
+ * 行まるごとを辞書に入れると再利用できないので、共通の前後を削って芯だけ残す。
+ */
+// 漢字・カタカナ・英数字は語を作る文字。ひらがなと記号は語の切れ目とみなす。
+const WORDY = /[\u4E00-\u9FFF\u3005\u30A1-\u30FA\u30FC0-9A-Za-z]/;
+
+function diffPair(before, after) {
+  if (!before || before === after) return null;
+  let head = 0;
+  while (head < before.length && head < after.length && before[head] === after[head]) head++;
+  let tail = 0;
+  while (tail < before.length - head && tail < after.length - head &&
+         before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
+
+  // 差分が1〜2文字だと規則が広すぎる。「小平倫太郎→小平凛太郎」を直しただけで
+  // 「倫→凛」を登録すると、無関係な「倫理」まで置換してしまう。
+  // そういうときだけ、前後の語のかたまりを巻き込むまで範囲を広げる。
+  if (before.slice(head, before.length - tail).length <= 2) {
+    while (head > 0 && WORDY.test(before[head - 1])) head--;
+    while (tail > 0 && WORDY.test(before[before.length - tail])) tail--;
+  }
+
+  const from = before.slice(head, before.length - tail);
+  const to = after.slice(head, after.length - tail);
+  if (!from) return null;                 // 追加しただけ（消すべき誤りが無い）
+  if (from.length > 30) return null;      // 長すぎるものは辞書に向かない
+  return { from, to };
+}
+
+async function loadReplacements() {
+  try {
+    const r = await fetch("/api/replacements");
+    const j = await r.json();
+    replacements = j.replacements || [];
+    $("replPath").textContent = j.path || "";
+  } catch (e) { replacements = []; }
+}
+
+function renderReplRows() {
+  const box = $("replRows");
+  box.innerHTML = "";
+  if (!replacements.length) {
+    const d = document.createElement("div");
+    d.className = "repl-empty";
+    d.textContent = "まだ登録がありません。行を編集して「辞書へ」を押すか、下の「＋ 行を追加」から登録します。";
+    box.appendChild(d);
+  }
+  replacements.forEach((rule, i) => {
+    const row = document.createElement("div");
+    row.className = "repl-row";
+
+    const from = document.createElement("input");
+    from.value = rule.from;
+    from.placeholder = "誤（文字起こしに出る形）";
+    from.addEventListener("input", () => { rule.from = from.value; });
+
+    const arrow = document.createElement("span");
+    arrow.className = "arrow";
+    arrow.textContent = "→";
+
+    const to = document.createElement("input");
+    to.value = rule.to;
+    to.placeholder = "正（置き換えたい形）";
+    to.addEventListener("input", () => { rule.to = to.value; });
+
+    const hit = document.createElement("span");
+    hit.className = "hit";
+    hit.textContent = state ? countHits(rule.from) : "";
+
+    const del = document.createElement("button");
+    del.textContent = "×";
+    del.title = "この行を削除";
+    del.addEventListener("click", () => { replacements.splice(i, 1); renderReplRows(); });
+
+    row.appendChild(from); row.appendChild(arrow); row.appendChild(to);
+    row.appendChild(hit); row.appendChild(del);
+    box.appendChild(row);
+  });
+  $("replCount").textContent = replacements.length + " 件";
+}
+
+/** いま開いている収録の中で、その語が何箇所あるか（適用前の目安） */
+function countHits(from) {
+  if (!from || !state) return "";
+  let n = 0;
+  for (const s of state.segments) {
+    if (!s.text) continue;
+    let i = 0;
+    while ((i = s.text.indexOf(from, i)) !== -1) { n++; i += from.length; }
+  }
+  return n ? n + "箇所" : "—";
+}
+
+function openRepl() {
+  renderReplRows();
+  $("replOverlay").hidden = false;
+}
+function closeRepl() { $("replOverlay").hidden = true; }
+
+async function saveReplacements() {
+  const res = await fetch("/api/replacements", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ replacements }),
+  });
+  const j = await res.json();
+  replacements = j.replacements || [];
+  renderReplRows();
+  toast("辞書を保存しました（" + replacements.length + "件）");
+}
+
+async function applyReplacements() {
+  if (!state) { toast("収録が選ばれていません"); return; }
+  await saveReplacements();                 // 編集中の内容を先に確定させる
+  if (!replacements.length) { toast("辞書が空です"); return; }
+  pushUndo("置換辞書の適用");               // ⌘Z で戻せるようにする
+  const res = await fetch("/api/apply-replacements?name=" + encodeURIComponent(state.name),
+                          { method: "POST" });
+  const j = await res.json();
+  if (j.error) { toast("適用に失敗しました"); undoStack.pop(); updateUndoBtn(); return; }
+  if (!j.applied) { toast("置換対象はありませんでした"); undoStack.pop(); updateUndoBtn(); return; }
+  state.segments = j.state.segments;
+  renderSegments();
+  setActive(Math.min(activeIdx, state.segments.length - 1));
+  renderReplRows();
+  const top = j.details.slice(0, 3).map((d) => d.from + "×" + d.count).join("、");
+  toast("置換 " + j.applied + "箇所 / " + j.segments + "行（" + top + "）");
+}
+
+/** 編集済みの行から「誤→正」を拾って辞書に足す */
+async function registerFromRow(idx) {
+  const seg = state.segments[idx];
+  const pair = diffPair(seg.original || "", seg.text || "");
+  if (!pair) { toast("辞書に入れられる差分がありません"); return; }
+  const dup = replacements.find((r) => r.from === pair.from);
+  if (dup) {
+    dup.to = pair.to;
+    toast("登録を更新: " + pair.from + " → " + pair.to);
+  } else {
+    replacements.push(pair);
+    toast("辞書に登録: " + pair.from + " → " + pair.to);
+  }
+  await saveReplacements();
+}
+
+$("replBtn").addEventListener("click", openRepl);
+$("replClose").addEventListener("click", closeRepl);
+$("replAdd").addEventListener("click", () => { replacements.push({ from: "", to: "" }); renderReplRows(); });
+$("replSave").addEventListener("click", saveReplacements);
+$("replApply").addEventListener("click", applyReplacements);
+$("replOverlay").addEventListener("click", (e) => { if (e.target.id === "replOverlay") closeRepl(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("replOverlay").hidden) { e.stopPropagation(); closeRepl(); }
+}, true);
+
+loadReplacements();

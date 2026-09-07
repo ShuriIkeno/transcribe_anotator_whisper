@@ -43,6 +43,7 @@
     <label style="color:var(--muted);font-size:13px" title="書き出しに時間を含める">
       <input type="checkbox" id="optTime"> 時刻付き
     </label>
+    <button id="replBtn" title="誤変換を「誤→正」で一括置換する辞書">置換辞書</button>
     <button id="undoBtn" title="直前の削除・分割・結合を取り消す (⌘Z)" disabled>元に戻す</button>
     <button id="exportBtn" class="primary">書き出し</button>
     <button id="resetBtn" title="トランスクリプトから作り直す（ラベルは消えます）">再読込</button>
@@ -53,6 +54,28 @@
   <div id="segments"></div>
   <div id="emptyMsg" class="empty">収録を選択してください。</div>
 </main>
+
+<div id="replOverlay" class="overlay" hidden>
+  <div class="panel">
+    <div class="panel-head">
+      <h2>置換辞書</h2>
+      <span id="replPath" class="muted-sm"></span>
+      <button id="replClose" style="margin-left:auto">閉じる</button>
+    </div>
+    <p class="muted-sm">
+      文字起こしに残った誤りを「誤 → 正」で一括置換します。モデルを上げても残る
+      同音語・言い間違い・漢字の揺れ向けです。長い語から順に、1度だけ置換します
+      （置換した結果が別の規則で再び置換されることはありません）。
+    </p>
+    <div id="replRows" class="repl-rows"></div>
+    <div class="panel-foot">
+      <button id="replAdd">＋ 行を追加</button>
+      <span id="replCount" class="muted-sm"></span>
+      <button id="replSave" style="margin-left:auto">辞書を保存</button>
+      <button id="replApply" class="primary">この収録に適用</button>
+    </div>
+  </div>
+</div>
 
 <footer>
   <div class="group"><kbd>Space</kbd> 再生/停止</div>

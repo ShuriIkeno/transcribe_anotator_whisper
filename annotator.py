@@ -6,11 +6,14 @@ faster-whisper で生成した `[開始s -> 終了s] テキスト` 形式のタ�
 トランスクリプトと音声を並べ、ブラウザ上で
   - 発話者ロールのラベル付け（任意個数のラベル）
   - 誤字の修正・セグメントの分割/結合
+  - 置換辞書（「誤 → 正」）による一括置換
 を行い、MAXQDA 等に読み込めるテキストへ書き出すためのローカルツール。
 
 追加パッケージ不要（Python 標準ライブラリのみ）。
     python annotator.py            # recordings/ を対象に http://127.0.0.1:8000 で起動
     python annotator.py --dir some_dir --port 8000
+
+置換辞書はリポジトリ直下の replacements.json（--replacements で変更可）。
 
 状態は各収録ごとに recordings/<name>.annot.json に自動保存されるため、
 途中でブラウザやサーバーが落ちても再起動すれば続きから再開できる。
@@ -26,6 +29,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEBUI_DIR = os.path.join(BASE_DIR, "webui")
+# 置換辞書はリポジトリ直下に置く（recordings/ は .gitignore なので共有できないため）
+DEFAULT_REPLACEMENTS = os.path.join(BASE_DIR, "replacements.json")
 
 AUDIO_EXTENSIONS = (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac", ".mp4")
 DEFAULT_ROLES = ["インタビュアー", "インタビュイー"]
@@ -55,8 +60,9 @@ def audio_mime(path):
 class Store:
     """recordings ディレクトリの走査と、アノテーション JSON の読み書き。"""
 
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, replacements_path=None):
         self.data_dir = os.path.abspath(data_dir)
+        self.replacements_path = os.path.abspath(replacements_path or DEFAULT_REPLACEMENTS)
 
     # --- 収録一覧 -----------------------------------------------------
     def list_projects(self):
@@ -174,6 +180,85 @@ class Store:
             json.dump(payload, f, ensure_ascii=False, indent=1)
         os.replace(tmp, path)  # アトミック置換
         return True
+
+    # --- 置換辞書 ----------------------------------------------------
+    # 「誤 → 正」の決定的な置換。Whisper のモデルを上げても残る同音語・
+    # 言い間違い・漢字の揺れを潰すためのもの。件数の上限は無い。
+
+    def load_replacements(self):
+        """[{"from": ..., "to": ...}, ...] を返す。壊れていても落とさない。"""
+        try:
+            with open(self.replacements_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+        items = data.get("replacements") if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            return []
+        out, seen = [], set()
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            src = (it.get("from") or "").strip()
+            dst = it.get("to") or ""
+            if src and src not in seen:  # 手で編集された辞書に重複があっても無視する
+                seen.add(src)
+                out.append({"from": src, "to": dst})
+        return out
+
+    def save_replacements(self, items):
+        seen, clean = set(), []
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            src = (it.get("from") or "").strip()
+            dst = it.get("to") or ""
+            if not src or src in seen:
+                continue  # 空と重複は捨てる（同じ誤りに2つの正解を持たせない）
+            seen.add(src)
+            clean.append({"from": src, "to": dst})
+        tmp = self.replacements_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"replacements": clean}, f, ensure_ascii=False, indent=1)
+            f.write("\n")
+        os.replace(tmp, self.replacements_path)  # アトミック置換
+        return clean
+
+    def apply_replacements(self, name):
+        """収録の全行に置換辞書を当て、置換後の状態を保存して結果を返す。"""
+        data = self.load_project(name)
+        if data is None:
+            return None
+        rules = self.load_replacements()
+        if not rules:
+            return {"applied": 0, "segments": 0, "details": [], "state": data}
+
+        # 長い語を先に並べる。正規表現の | は左優先なので、これで最長一致になり、
+        # 短い語が長い語の一部を先に食う事故を防ぐ。
+        rules = sorted(rules, key=lambda r: len(r["from"]), reverse=True)
+        mapping = {r["from"]: r["to"] for r in rules}
+        pattern = re.compile("|".join(re.escape(r["from"]) for r in rules))
+        counts = {r["from"]: 0 for r in rules}
+
+        def sub(m):
+            # 単一パスで置換する。置換した結果を別の規則が再び置換する
+            # （A→B したあと B→C が走る）連鎖を避けるため。
+            counts[m.group(0)] += 1
+            return mapping[m.group(0)]
+
+        touched = 0
+        for seg in data["segments"]:
+            before = seg.get("text") or ""
+            after = pattern.sub(sub, before)
+            if after != before:
+                seg["text"] = after
+                touched += 1
+        if touched:
+            self.save_project(name, data)
+        details = [{"from": k, "count": v} for k, v in counts.items() if v]
+        details.sort(key=lambda d: -d["count"])
+        return {"applied": sum(counts.values()), "segments": touched,
+                "details": details, "state": self.load_project(name)}
 
     # --- 書き出し ----------------------------------------------------
     def export_project(self, name):
@@ -346,6 +431,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/list":
             self._send_json({"projects": self.store.list_projects()})
+        elif path == "/api/replacements":
+            self._send_json({"replacements": self.store.load_replacements(),
+                             "path": self.store.replacements_path})
         elif path == "/api/project":
             name = (qs.get("name") or [""])[0]
             data = self.store.load_project(name)
@@ -382,6 +470,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": "not found"}, 404)
             else:
                 self._send_json(data)
+        elif path == "/api/replacements":
+            body = self._read_body()
+            items = body.get("replacements") if isinstance(body, dict) else body
+            saved = self.store.save_replacements(items)
+            self._send_json({"ok": True, "replacements": saved})
+        elif path == "/api/apply-replacements":
+            result = self.store.apply_replacements(name)
+            if result is None:
+                self._send_json({"error": "not found"}, 404)
+            else:
+                self._send_json({"ok": True, **result})
         elif path == "/api/export":
             result = self.store.export_project(name)
             if result is None:
@@ -398,13 +497,17 @@ def main():
                         help="収録（*_timecoded.txt と音声）のディレクトリ")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--replacements", default=DEFAULT_REPLACEMENTS,
+                        help="置換辞書のJSON（既定: リポジトリ直下の replacements.json）")
     args = parser.parse_args()
 
-    Handler.store = Store(args.dir)
+    Handler.store = Store(args.dir, args.replacements)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     url = "http://%s:%d/" % (args.host, args.port)
     print("アノテーターを起動しました:", url)
     print("対象ディレクトリ:", Handler.store.data_dir)
+    print("置換辞書:", Handler.store.replacements_path,
+          "(%d件)" % len(Handler.store.load_replacements()))
     print("停止するには Ctrl+C")
     try:
         server.serve_forever()
