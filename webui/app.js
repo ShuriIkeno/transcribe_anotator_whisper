@@ -131,10 +131,17 @@ async function loadProject(name) {
   setSaveState("");
   renderRoles();
   renderSegments();
+  syncSpeakerCount();
 }
 
 // ------------------------------------------------------------------ ロール凡例
 function renderRoles() {
+  // 人数に応じて行のロール欄の幅を決める。2人なら従来どおり、増えるほど広げる。
+  const n = state ? state.roles.length : 2;
+  document.body.classList.toggle("many-speakers", n >= 4);
+  const width = n >= 4 ? n * 27 + 6 : 130;   // 4人以上は番号だけなので狭くて済む
+  document.documentElement.style.setProperty("--role-col", width + "px");
+
   const box = $("roles");
   box.innerHTML = "";
   state.roles.forEach((role, i) => {
@@ -162,7 +169,7 @@ function addRole() {
   const name = prompt("ロール名", "話者" + (state.roles.length + 1));
   if (!name) return;
   state.roles.push(name.trim());
-  renderRoles(); renderSegments(); scheduleSave();
+  renderRoles(); renderSegments(); scheduleSave(); syncSpeakerCount();
 }
 function renameRole(i, newName) {
   if (!newName || newName === state.roles[i]) { renderRoles(); return; }
@@ -178,7 +185,7 @@ function deleteRole(i) {
   if (used && !confirm("「" + role + "」は " + used + " 行で使用中です。削除すると未設定に戻ります。よろしいですか？")) return;
   state.roles.splice(i, 1);
   state.segments.forEach((s) => { if (s.role === role) s.role = null; });
-  renderRoles(); renderSegments(); scheduleSave();
+  renderRoles(); renderSegments(); scheduleSave(); syncSpeakerCount();
 }
 
 // ------------------------------------------------------------------ セグメント描画
@@ -205,12 +212,15 @@ function buildSeg(seg, idx) {
 
   const roleCell = document.createElement("div");
   roleCell.className = "role-cell";
+  const many = state.roles.length >= 4;
   state.roles.forEach((role, ri) => {
     const b = document.createElement("button");
     b.className = "role-btn" + (seg.role === role ? " on" : "");
-    b.textContent = role;
+    // 4人以上は名前だと1行に収まらず行が3段に伸びるので、番号だけにする。
+    // 番号はそのままキーボードの数字キーで、名前はヘッダーのチップで分かる。
+    b.textContent = many ? String(ri + 1) : role;
     if (seg.role === role) b.style.background = PALETTE[ri % PALETTE.length];
-    b.title = "キー " + (ri + 1);
+    b.title = role + "（キー " + (ri + 1) + "）";
     b.addEventListener("click", (e) => { e.stopPropagation(); assignRole(idx, seg.role === role ? null : role); });
     roleCell.appendChild(b);
   });
@@ -223,7 +233,9 @@ function buildSeg(seg, idx) {
   dictB.hidden = seg.text === seg.original;   // 直した行にだけ出す
 
   const text = document.createElement("div");
-  text.className = "text" + (seg.text !== seg.original ? " edited" : "");
+  text.className = "text" + (seg.text !== seg.original ? " edited" : "")
+                          + (seg.unclear ? " unclear" : "");
+  if (seg.unclear) text.title = "話者の推定に迷いあり（2位と僅差）。聞いて確かめてください";
   text.contentEditable = "true";
   text.spellcheck = false;
   text.textContent = seg.text;
@@ -656,7 +668,118 @@ $("replSave").addEventListener("click", saveReplacements);
 $("replApply").addEventListener("click", applyReplacements);
 $("replOverlay").addEventListener("click", (e) => { if (e.target.id === "replOverlay") closeRepl(); });
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("diarOverlay").hidden) { e.stopPropagation(); closeDiar(); return; }
   if (e.key === "Escape" && !$("replOverlay").hidden) { e.stopPropagation(); closeRepl(); }
 }, true);
 
 loadReplacements();
+
+// ------------------------------------------------------------------ 話者の人数
+// ロールは何個でも足せるが、インタビューでは「何人いるか」から入るほうが早い。
+// 増やすときは足すだけ、減らすときは末尾から外す（使用中なら確認する）。
+function syncSpeakerCount() {
+  if (!state) return;
+  $("speakerCount").value = String(Math.min(9, Math.max(2, state.roles.length)));
+}
+
+function setSpeakerCount(n) {
+  if (!state) return;
+  const cur = state.roles.length;
+  if (n === cur) return;
+  if (n > cur) {
+    for (let i = cur; i < n; i++) state.roles.push("話者" + (i + 1));
+  } else {
+    // 末尾から外す。割り当て済みの行があるものは確認してから
+    const doomed = state.roles.slice(n);
+    const used = doomed.filter((r) => state.segments.some((s) => s.role === r));
+    if (used.length &&
+        !confirm(used.join("、") + " は使用中です。減らすと該当行は未設定に戻ります。よろしいですか？")) {
+      syncSpeakerCount();
+      return;
+    }
+    state.roles = state.roles.slice(0, n);
+    state.segments.forEach((s) => { if (s.role && !state.roles.includes(s.role)) s.role = null; });
+  }
+  renderRoles(); renderSegments(); scheduleSave();
+  syncSpeakerCount();
+}
+
+$("speakerCount").addEventListener("change", (e) => setSpeakerCount(parseInt(e.target.value, 10)));
+
+// ------------------------------------------------------------------ 話者分離の取り込み
+let diarInfo = null;   // {found, file, spans, speakers}
+
+async function openDiar() {
+  if (!state) { toast("収録が選ばれていません"); return; }
+  const body = $("diarBody");
+  body.innerHTML = "";
+  $("diarNote").textContent = "";
+  $("diarFile").textContent = "";
+  $("diarOverlay").hidden = false;
+
+  const r = await fetch("/api/diarization?name=" + encodeURIComponent(state.name));
+  diarInfo = await r.json();
+  if (!diarInfo.found) {
+    body.innerHTML = '<div class="repl-empty">' +
+      '話者分離のファイルが見つかりません。<br>' +
+      '収録と同じ場所に <code>' + state.name + '.json</code>（WhisperX の出力）か ' +
+      '<code>' + state.name + '.rttm</code> を置いてください。</div>';
+    $("diarApply").disabled = true;
+    return;
+  }
+  $("diarApply").disabled = false;
+  $("diarFile").textContent = diarInfo.file + "（" + diarInfo.spans + "区間）";
+  // 検出された話者に名前を割り当てられるようにする
+  diarInfo.speakers.forEach((spk) => {
+    const row = document.createElement("div");
+    row.className = "repl-row";
+    const label = document.createElement("span");
+    label.textContent = spk;
+    label.style.cssText = "flex:none;min-width:110px;font-size:13px;color:var(--muted)";
+    const arrow = document.createElement("span");
+    arrow.className = "arrow"; arrow.textContent = "→";
+    const input = document.createElement("input");
+    input.value = spk;
+    input.dataset.speaker = spk;
+    input.placeholder = "この話者の名前（例: インタビュアー）";
+    row.appendChild(label); row.appendChild(arrow); row.appendChild(input);
+    body.appendChild(row);
+  });
+  $("diarNote").textContent = diarInfo.speakers.length + "人を検出";
+}
+
+function closeDiar() { $("diarOverlay").hidden = true; }
+
+async function applyDiar() {
+  if (!state || !diarInfo || !diarInfo.found) return;
+  const mapping = {};
+  $("diarBody").querySelectorAll("input[data-speaker]").forEach((el) => {
+    const v = el.value.trim();
+    if (v) mapping[el.dataset.speaker] = v;
+  });
+  pushUndo("話者の割り当て");           // ⌘Z で戻せるようにする
+  const res = await fetch("/api/apply-speakers?name=" + encodeURIComponent(state.name), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mapping }),
+  });
+  const j = await res.json();
+  if (!j.ok) {
+    undoStack.pop(); updateUndoBtn();
+    toast(j.error === "no_file" ? "話者分離のファイルがありません" : "読み込めませんでした");
+    return;
+  }
+  state.roles = j.state.roles;
+  state.segments = j.state.segments;
+  renderRoles(); renderSegments();
+  setActive(Math.min(activeIdx, state.segments.length - 1));
+  syncSpeakerCount();
+  closeDiar();
+  toast("話者を割り当てました: " + j.assigned + "行 / 迷い " + j.unclear +
+        "行 / 対応なし " + j.unmatched + "行");
+}
+
+$("diarBtn").addEventListener("click", openDiar);
+$("diarClose").addEventListener("click", closeDiar);
+$("diarApply").addEventListener("click", applyDiar);
+$("diarOverlay").addEventListener("click", (e) => { if (e.target.id === "diarOverlay") closeDiar(); });
