@@ -639,9 +639,16 @@ $("replAdd").addEventListener("click", () => { replacements.push({ from: "", to:
 $("replSave").addEventListener("click", saveReplacements);
 $("replApply").addEventListener("click", applyReplacements);
 $("replOverlay").addEventListener("click", (e) => { if (e.target.id === "replOverlay") closeRepl(); });
+// Escape はどのダイアログでも閉じる。手前（後から開いたもの）から順に。
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("diarOverlay").hidden) { e.stopPropagation(); closeDiar(); return; }
-  if (e.key === "Escape" && !$("replOverlay").hidden) { e.stopPropagation(); closeRepl(); }
+  if (e.key !== "Escape") return;
+  for (const id of ["rolesOverlay", "diarOverlay", "replOverlay"]) {
+    if (!$(id).hidden) {
+      e.stopPropagation();
+      ({ rolesOverlay: closeRoles, diarOverlay: closeDiar, replOverlay: closeRepl })[id]();
+      return;
+    }
+  }
 }, true);
 
 loadReplacements();
