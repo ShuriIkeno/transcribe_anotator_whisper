@@ -140,6 +140,7 @@ class Store:
                 data = json.load(f)
             data.setdefault("roles", list(DEFAULT_ROLES))
             data.setdefault("options", {"merge": True, "timecodes": False})
+            data.setdefault("origins", {})
         else:
             if not os.path.exists(self._timecoded_path(name)):
                 return None
@@ -175,6 +176,9 @@ class Store:
         payload = {
             "name": name,
             "roles": data.get("roles", list(DEFAULT_ROLES)),
+            # origins は「話者分離のラベル → 人に付けた名前」の対応。
+            # 名前を付けたあとも、どの SPEAKER_xx だったかを追えるように残す。
+            "origins": data.get("origins", {}),
             "options": data.get("options", {"merge": True, "timecodes": False}),
             "segments": data.get("segments", []),
         }
@@ -308,6 +312,7 @@ class Store:
         # 全行を振り直すので、既存のロールは残さず話者分離の結果で置き換える。
         # 残すと使われない「インタビュアー/インタビュイー」が並んで邪魔になる。
         data["roles"] = [mapping.get(spk, spk) for spk in speakers]
+        data["origins"] = {spk: mapping.get(spk, spk) for spk in speakers}
         self.save_project(name, data)
         return {"path": os.path.basename(path), "speakers": speakers,
                 "assigned": assigned, "unclear": unclear, "unmatched": unmatched,
