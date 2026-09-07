@@ -36,6 +36,7 @@
   <div id="roles" class="group"></div>
 
   <div class="group" style="margin-left:auto">
+    <button id="replBtn" title="誤変換を「誤→正」で一括置換する辞書">置換辞書</button>
     <span id="saveState">—</span>
     <label style="color:var(--muted);font-size:13px" title="同じ話者の連続行を結合して書き出す">
       <input type="checkbox" id="optMerge"> 連続結合
@@ -43,7 +44,6 @@
     <label style="color:var(--muted);font-size:13px" title="書き出しに時間を含める">
       <input type="checkbox" id="optTime"> 時刻付き
     </label>
-    <button id="replBtn" title="誤変換を「誤→正」で一括置換する辞書">置換辞書</button>
     <button id="undoBtn" title="直前の削除・分割・結合を取り消す (⌘Z)" disabled>元に戻す</button>
     <button id="exportBtn" class="primary">書き出し</button>
     <button id="resetBtn" title="トランスクリプトから作り直す（ラベルは消えます）">再読込</button>
