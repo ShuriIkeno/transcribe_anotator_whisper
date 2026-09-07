@@ -108,7 +108,9 @@ main { flex: 1; overflow-y: auto; padding: 8px 0 40vh; }
 
 .seg {
   display: grid;
-  grid-template-columns: 66px 130px 1fr auto;
+  /* ロール欄は人数で広げる。2人前提の固定幅だと5人で縦に積み上がって
+     1行が異常に高くなるため、--role-col を JS 側から差し替える */
+  grid-template-columns: 66px var(--role-col, 130px) 1fr auto;
   gap: 10px;
   align-items: start;
   padding: 6px 14px;
@@ -130,6 +132,12 @@ main { flex: 1; overflow-y: auto; padding: 8px 0 40vh; }
 .seg .role-btn {
   border: 1px solid var(--line); border-radius: 6px;
   padding: 2px 8px; font-size: 12px; background: #fff; color: var(--muted);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 4人以上は番号だけの正方形にして1段に収める。名前はヘッダーのチップで読む */
+body.many-speakers .seg .role-btn {
+  padding: 2px 0; font-size: 12px; width: 24px; text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 .seg .role-btn.on { color: #fff; border-color: transparent; font-weight: 700; }
 
@@ -239,3 +247,6 @@ kbd {
 
 /* 行の「辞書へ」ボタン（編集済みの行にだけ出る） */
 .ops .to-dict { color: var(--accent); }
+
+/* 話者の推定に迷いがある行（2位と僅差）。聞いて確かめる当たりどころ */
+.text.unclear { border-left: 3px solid #e0a020; padding-left: 7px; }
