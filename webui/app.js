@@ -37,6 +37,22 @@ function isEditing() {
   return a && a.classList && a.classList.contains("text");
 }
 
+/** どこかの入力欄に文字を打ち込んでいる最中か。
+ *  contenteditable だけを見ていると、ダイアログの <input> で打った
+ *  「内田」の d が「現在行を削除」に化けるなどの事故が起きる。 */
+function isTyping() {
+  const a = document.activeElement;
+  if (!a) return false;
+  if (a.isContentEditable) return true;
+  const tag = a.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+
+/** ダイアログを開いている間は本文のショートカットを止める */
+function anyOverlayOpen() {
+  return Array.prototype.some.call(document.querySelectorAll(".overlay"), (o) => !o.hidden);
+}
+
 // ------------------------------------------------------------------ 保存
 function setSaveState(kind) {
   const el = $("saveState");
@@ -409,9 +425,13 @@ function togglePlay() {
 // ------------------------------------------------------------------ キーボード
 document.addEventListener("keydown", (e) => {
   if (!state) return;
-  // ロール名やテキスト編集中はショートカット無効（Escで抜ける）
-  const editing = document.activeElement && document.activeElement.isContentEditable;
-  if (editing) {
+  // IME で変換している最中のキーは横取りしない。日本語入力では
+  // 確定前のキーがそのまま飛んでくるため（「内田」の d など）。
+  if (e.isComposing || e.keyCode === 229) return;
+  // ダイアログを開いている間は本文の操作を止める
+  if (anyOverlayOpen()) return;
+  // 入力欄・テキスト編集中はショートカット無効（Escで抜ける）
+  if (isTyping()) {
     if (e.key === "Escape") document.activeElement.blur();
     return;
   }
