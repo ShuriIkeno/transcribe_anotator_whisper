@@ -97,10 +97,7 @@ button:disabled { opacity: .5; cursor: default; }
   background: var(--ink); color: #fff; font-size: 11px; font-weight: 700;
 }
 .role-chip .swatch { width: 12px; height: 12px; border-radius: 50%; }
-.role-chip .name { cursor: text; }
-.role-chip .del { border: none; padding: 0 2px; color: var(--muted); background: none; }
-.role-chip .del:hover { color: #d33; }
-#addRole { border-style: dashed; color: var(--muted); }
+.role-chip .name { padding-right: 4px; }
 
 /* --- 本文 --------------------------------------------------------- */
 main { flex: 1; overflow-y: auto; padding: 8px 0 40vh; }
@@ -250,3 +247,16 @@ kbd {
 
 /* 話者の推定に迷いがある行（2位と僅差）。聞いて確かめる当たりどころ */
 .text.unclear { border-left: 3px solid #e0a020; padding-left: 7px; }
+
+/* 話者登録パネルの行 */
+.repl-row .role-key {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: 4px;
+  background: var(--ink); color: #fff; font-size: 11px; font-weight: 700;
+}
+.repl-row .role-swatch { flex: none; width: 12px; height: 12px; border-radius: 50%; }
+/* 話者分離の元ラベル。手で照合した対応を後から追えるように添える */
+.repl-row .role-origin {
+  flex: none; min-width: 92px; font-size: 11px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
