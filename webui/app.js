@@ -21,6 +21,10 @@ function fmt(t) {
   const m = Math.floor(t / 60), s = Math.floor(t % 60);
   return m + ":" + String(s).padStart(2, "0");
 }
+/** ボタンに出す短縮名。頭2文字だけ（絵文字などのサロゲートペアも壊さない） */
+function shortRole(role) {
+  return Array.from(role || "").slice(0, 2).join("");
+}
 function roleColor(role) {
   if (!state) return "#999";
   const i = state.roles.indexOf(role);
@@ -139,10 +143,11 @@ async function loadProject(name) {
 // ------------------------------------------------------------------ ロール凡例
 function renderRoles() {
   // 人数に応じて行のロール欄の幅を決める。2人なら従来どおり、増えるほど広げる。
+  // 2段に収めるので、列数は人数の半分（切り上げ）。幅もそれに合わせる。
   const n = state ? state.roles.length : 2;
-  document.body.classList.toggle("many-speakers", n >= 4);
-  const width = n >= 4 ? n * 27 + 6 : 130;   // 4人以上は番号だけなので狭くて済む
-  document.documentElement.style.setProperty("--role-col", width + "px");
+  const cols = Math.max(1, Math.ceil(n / 2));
+  document.documentElement.style.setProperty("--role-cols", cols);
+  document.documentElement.style.setProperty("--role-col", (cols * 52 + 6) + "px");
 
   // ヘッダーのチップは表示専用。編集は「話者を登録」のパネルで行う。
   const box = $("roles");
@@ -182,15 +187,20 @@ function buildSeg(seg, idx) {
   time.addEventListener("click", (e) => { e.stopPropagation(); seek(seg.start, true); setActive(idx); });
   row.appendChild(time);
 
+  // ロールは常に2段に並べる。名前は頭2文字だけ出し、番号（キーボードの数字キー）を
+  // 添える。「インタビュアー」と「インタビュイー」は2文字だと区別が付かないため。
   const roleCell = document.createElement("div");
   roleCell.className = "role-cell";
-  const many = state.roles.length >= 4;
   state.roles.forEach((role, ri) => {
     const b = document.createElement("button");
     b.className = "role-btn" + (seg.role === role ? " on" : "");
-    // 4人以上は名前だと1行に収まらず行が3段に伸びるので、番号だけにする。
-    // 番号はそのままキーボードの数字キーで、名前はヘッダーのチップで分かる。
-    b.textContent = many ? String(ri + 1) : role;
+    const num = document.createElement("span");
+    num.className = "n";
+    num.textContent = String(ri + 1);
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = shortRole(role);
+    b.appendChild(num); b.appendChild(nm);
     if (seg.role === role) b.style.background = PALETTE[ri % PALETTE.length];
     b.title = role + "（キー " + (ri + 1) + "）";
     b.addEventListener("click", (e) => { e.stopPropagation(); assignRole(idx, seg.role === role ? null : role); });
