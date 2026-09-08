@@ -147,6 +147,7 @@ class Store:
             data = {
                 "name": name,
                 "roles": list(DEFAULT_ROLES),
+                "origins": {},
                 "options": {"merge": True, "timecodes": False},
                 "segments": self.parse_timecoded(name),
             }
@@ -162,6 +163,7 @@ class Store:
         data = {
             "name": name,
             "roles": list(DEFAULT_ROLES),
+            "origins": {},
             "options": {"merge": True, "timecodes": False},
             "segments": self.parse_timecoded(name),
         }
@@ -266,12 +268,20 @@ class Store:
         path = self.find_diarization(name)
         if not path:
             return {"error": "no_file"}
+        # 上書きされる手作業がどれだけあるか、呼び出し側に知らせる
+        had_roles = sum(1 for s in data["segments"] if s.get("role"))
         spans = self.load_diarization(path)
         if not spans:
             return {"error": "empty", "path": path}
 
         mapping = mapping or {}
         speakers = sorted({spk for _, _, spk in spans})   # SPEAKER_00, 01, ... の順
+
+        # 前回この収録で SPEAKER_xx に付けた名前を引き継ぐ。引き継がないと、
+        # 読み込み直すたびに手でやった照合が SPEAKER_00 に戻ってしまう。
+        # 優先順位は「今回の指定 → 前回付けた名前 → 元のラベル」。
+        previous = data.get("origins") or {}
+        resolved = {spk: (mapping.get(spk) or previous.get(spk) or spk) for spk in speakers}
 
         spans.sort(key=lambda x: x[0])
         starts = [sp[0] for sp in spans]
@@ -301,7 +311,7 @@ class Store:
                 continue
             ranked = sorted(overlap.items(), key=lambda kv: -kv[1])
             top, top_dur = ranked[0]
-            seg["role"] = mapping.get(top, top)
+            seg["role"] = resolved[top]
             assigned += 1
             if len(ranked) > 1 and ranked[1][1] > top_dur * margin:
                 seg["unclear"] = True   # 2位と僅差。人手で確認したい行
@@ -311,12 +321,13 @@ class Store:
 
         # 全行を振り直すので、既存のロールは残さず話者分離の結果で置き換える。
         # 残すと使われない「インタビュアー/インタビュイー」が並んで邪魔になる。
-        data["roles"] = [mapping.get(spk, spk) for spk in speakers]
-        data["origins"] = {spk: mapping.get(spk, spk) for spk in speakers}
+        data["roles"] = [resolved[spk] for spk in speakers]
+        data["origins"] = resolved
         self.save_project(name, data)
         return {"path": os.path.basename(path), "speakers": speakers,
                 "assigned": assigned, "unclear": unclear, "unmatched": unmatched,
-                "state": self.load_project(name)}
+                "kept_names": {k: v for k, v in resolved.items() if k != v},
+                "had_roles": had_roles, "state": self.load_project(name)}
 
     # --- 置換辞書 ----------------------------------------------------
     # 「誤 → 正」の決定的な置換。Whisper のモデルを上げても残る同音語・

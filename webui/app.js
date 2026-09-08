@@ -844,6 +844,14 @@ function closeDiar() { $("diarOverlay").hidden = true; }
 
 async function applyDiar() {
   if (!state || !diarInfo || !diarInfo.found) return;
+  // 全行を振り直すので、手で直した割り当ては失われる。黙って消さない。
+  const assigned = state.segments.filter((s) => s.role).length;
+  if (assigned &&
+      !confirm("すでに " + assigned + " 行に話者が付いています。\n" +
+               "読み込み直すと全行が振り直され、手で直した分は失われます。\n" +
+               "（付けた話者の名前は引き継がれます。⌘Z で戻せます）\n\nよろしいですか？")) {
+    return;
+  }
   pushUndo("話者の割り当て");           // ⌘Z で戻せるようにする
   const res = await fetch("/api/apply-speakers?name=" + encodeURIComponent(state.name), {
     method: "POST",
@@ -863,8 +871,10 @@ async function applyDiar() {
   setActive(Math.min(activeIdx, state.segments.length - 1));
   syncSpeakerCount();
   closeDiar();
+  const kept = Object.keys(j.kept_names || {}).length;
   toast("話者を割り当てました: " + j.assigned + "行 / 迷い " + j.unclear +
-        "行 / 対応なし " + j.unmatched + "行");
+        "行 / 対応なし " + j.unmatched + "行" +
+        (kept ? "（名前 " + kept + "件を引き継ぎ）" : ""));
   openRoles();   // そのまま「誰がどの話者か」の照合へ進む
 }
 
