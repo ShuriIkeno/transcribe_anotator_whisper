@@ -33,9 +33,15 @@
 
   <input type="range" id="seekbar" class="seekbar" min="0" max="1000" value="0" step="1" title="再生位置（ドラッグでシーク）">
 
+  <div class="group">
+    <button id="rolesBtn" title="話者の人数と名前をまとめて編集する">話者を登録</button>
+    <button id="diarBtn" title="話者分離の結果を読み込んで自動で割り当てる">話者を読み込む</button>
+  </div>
+
   <div id="roles" class="group"></div>
 
   <div class="group" style="margin-left:auto">
+    <button id="replBtn" title="誤変換を「誤→正」で一括置換する辞書">置換辞書</button>
     <span id="saveState">—</span>
     <label style="color:var(--muted);font-size:13px" title="同じ話者の連続行を結合して書き出す">
       <input type="checkbox" id="optMerge"> 連続結合
@@ -53,6 +59,82 @@
   <div id="segments"></div>
   <div id="emptyMsg" class="empty">収録を選択してください。</div>
 </main>
+
+<div id="rolesOverlay" class="overlay" hidden>
+  <div class="panel">
+    <div class="panel-head">
+      <h2>話者を登録</h2>
+      <label class="muted-sm" style="margin-left:4px">人数
+        <select id="speakerCount">
+          <option value="2">2人</option>
+          <option value="3">3人</option>
+          <option value="4">4人</option>
+          <option value="5">5人</option>
+          <option value="6">6人</option>
+          <option value="7">7人</option>
+          <option value="8">8人</option>
+          <option value="9">9人</option>
+        </select>
+      </label>
+      <button id="rolesClose" style="margin-left:auto">閉じる</button>
+    </div>
+    <p class="muted-sm">
+      この収録に出てくる話者を登録します。名前は行のボタンとヘッダー、書き出しに使われます。
+      左の番号はキーボードの数字キーに対応します。
+    </p>
+    <div id="rolesRows" class="repl-rows"></div>
+    <div class="panel-foot">
+      <button id="rolesAdd">＋ 話者を追加</button>
+      <span id="rolesCount" class="muted-sm"></span>
+      <button id="rolesSave" class="primary" style="margin-left:auto">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="diarOverlay" class="overlay" hidden>
+  <div class="panel">
+    <div class="panel-head">
+      <h2>話者を読み込む</h2>
+      <span id="diarFile" class="muted-sm"></span>
+      <button id="diarClose" style="margin-left:auto">閉じる</button>
+    </div>
+    <p class="muted-sm">
+      収録と同じ場所にある話者分離の結果（WhisperX の JSON、または RTTM）を読み、
+      各行に話者を割り当てます。行ごとに<strong>重なった時間で重み付けした多数決</strong>で
+      1人に決めます（日本語は1文字ずつ話者が付くため、そのままでは細かく揺れるので）。
+      2位と僅差だった行には印を付けます。<br>
+      <strong>誰がどの話者かの照合は、割り当てたあとに「話者を登録」で行います。</strong>
+      発話行数が手がかりになります。一度名前を付けておけば、読み込み直しても引き継がれます。
+    </p>
+    <div id="diarBody" class="repl-rows"></div>
+    <div class="panel-foot">
+      <span id="diarNote" class="muted-sm"></span>
+      <button id="diarApply" class="primary" style="margin-left:auto">割り当てて照合へ</button>
+    </div>
+  </div>
+</div>
+
+<div id="replOverlay" class="overlay" hidden>
+  <div class="panel">
+    <div class="panel-head">
+      <h2>置換辞書</h2>
+      <span id="replPath" class="muted-sm"></span>
+      <button id="replClose" style="margin-left:auto">閉じる</button>
+    </div>
+    <p class="muted-sm">
+      文字起こしに残った誤りを「誤 → 正」で一括置換します。モデルを上げても残る
+      同音語・言い間違い・漢字の揺れ向けです。長い語から順に、1度だけ置換します
+      （置換した結果が別の規則で再び置換されることはありません）。
+    </p>
+    <div id="replRows" class="repl-rows"></div>
+    <div class="panel-foot">
+      <button id="replAdd">＋ 行を追加</button>
+      <span id="replCount" class="muted-sm"></span>
+      <button id="replSave" style="margin-left:auto">辞書を保存</button>
+      <button id="replApply" class="primary">この収録に適用</button>
+    </div>
+  </div>
+</div>
 
 <footer>
   <div class="group"><kbd>Space</kbd> 再生/停止</div>

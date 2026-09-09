@@ -3,6 +3,7 @@
 // ------------------------------------------------------------------ 状態
 const PALETTE = ["#2f6fed", "#e0562d", "#2a9d5c", "#8b46c9", "#c9358a",
                  "#0d8f9e", "#b8860b", "#5566aa", "#606770"];
+const DEFAULT_ROLE_NAMES = ["インタビュアー", "インタビュイー"];
 
 let state = null;      // {name, roles:[str], options:{merge,timecodes}, segments:[...]}
 let activeIdx = 0;     // キーボード操作のカーソル行
@@ -42,6 +43,10 @@ function parseTimeInput(str) {
   const v = Number(str);
   return isFinite(v) && v >= 0 ? v : null;
 }
+/** ボタンに出す短縮名。頭2文字だけ（絵文字などのサロゲートペアも壊さない） */
+function shortRole(role) {
+  return Array.from(role || "").slice(0, 2).join("");
+}
 function roleColor(role) {
   if (!state) return "#999";
   const i = state.roles.indexOf(role);
@@ -57,6 +62,22 @@ function toast(msg) {
 function isEditing() {
   const a = document.activeElement;
   return a && a.classList && a.classList.contains("text");
+}
+
+/** どこかの入力欄に文字を打ち込んでいる最中か。
+ *  contenteditable だけを見ていると、ダイアログの <input> で打った
+ *  「内田」の d が「現在行を削除」に化けるなどの事故が起きる。 */
+function isTyping() {
+  const a = document.activeElement;
+  if (!a) return false;
+  if (a.isContentEditable) return true;
+  const tag = a.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+
+/** ダイアログを開いている間は本文のショートカットを止める */
+function anyOverlayOpen() {
+  return Array.prototype.some.call(document.querySelectorAll(".overlay"), (o) => !o.hidden);
 }
 
 // ------------------------------------------------------------------ 保存
@@ -79,7 +100,8 @@ async function doSave() {
     const res = await fetch("/api/save?name=" + encodeURIComponent(state.name), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ roles: state.roles, options: state.options, segments: state.segments }),
+      body: JSON.stringify({ roles: state.roles, origins: state.origins || {},
+                             options: state.options, segments: state.segments }),
     });
     const j = await res.json();
     if (j.ok) { dirty = false; setSaveState("saved"); }
@@ -137,54 +159,32 @@ async function loadProject(name) {
   setSaveState("");
   renderRoles();
   renderSegments();
+  syncSpeakerCount();
 }
 
 // ------------------------------------------------------------------ ロール凡例
 function renderRoles() {
+  // 人数に応じて行のロール欄の幅を決める。2人なら従来どおり、増えるほど広げる。
+  // 2段に収めるので、列数は人数の半分（切り上げ）。幅もそれに合わせる。
+  const n = state ? state.roles.length : 2;
+  const cols = Math.max(1, Math.ceil(n / 2));
+  document.documentElement.style.setProperty("--role-cols", cols);
+  document.documentElement.style.setProperty("--role-col", (cols * 52 + 6) + "px");
+
+  // ヘッダーのチップは表示専用。編集は「話者を登録」のパネルで行う。
   const box = $("roles");
   box.innerHTML = "";
   state.roles.forEach((role, i) => {
     const chip = document.createElement("div");
     chip.className = "role-chip";
+    chip.title = "キー " + (i + 1) + " でこの話者を付ける";
     chip.innerHTML =
       '<span class="key">' + (i + 1) + '</span>' +
       '<span class="swatch" style="background:' + PALETTE[i % PALETTE.length] + '"></span>' +
-      '<span class="name" contenteditable="true" spellcheck="false"></span>' +
-      '<button class="del" title="削除">×</button>';
-    const nameEl = chip.querySelector(".name");
-    nameEl.textContent = role;
-    nameEl.addEventListener("blur", () => renameRole(i, nameEl.textContent.trim()));
-    nameEl.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); nameEl.blur(); } });
-    chip.querySelector(".del").addEventListener("click", () => deleteRole(i));
+      '<span class="name"></span>';
+    chip.querySelector(".name").textContent = role;
     box.appendChild(chip);
   });
-  const add = document.createElement("button");
-  add.id = "addRole";
-  add.textContent = "＋ ロール";
-  add.addEventListener("click", addRole);
-  box.appendChild(add);
-}
-function addRole() {
-  const name = prompt("ロール名", "話者" + (state.roles.length + 1));
-  if (!name) return;
-  state.roles.push(name.trim());
-  renderRoles(); renderSegments(); scheduleSave();
-}
-function renameRole(i, newName) {
-  if (!newName || newName === state.roles[i]) { renderRoles(); return; }
-  const old = state.roles[i];
-  state.roles[i] = newName;
-  // 割り当て済みの行も追従
-  state.segments.forEach((s) => { if (s.role === old) s.role = newName; });
-  renderRoles(); renderSegments(); scheduleSave();
-}
-function deleteRole(i) {
-  const role = state.roles[i];
-  const used = state.segments.filter((s) => s.role === role).length;
-  if (used && !confirm("「" + role + "」は " + used + " 行で使用中です。削除すると未設定に戻ります。よろしいですか？")) return;
-  state.roles.splice(i, 1);
-  state.segments.forEach((s) => { if (s.role === role) s.role = null; });
-  renderRoles(); renderSegments(); scheduleSave();
 }
 
 // ------------------------------------------------------------------ セグメント描画
@@ -210,28 +210,46 @@ function buildSeg(seg, idx) {
 
   row.appendChild(buildTimeCell(seg, idx));
 
+  // ロールは常に2段に並べる。名前は頭2文字だけ出し、番号（キーボードの数字キー）を
+  // 添える。「インタビュアー」と「インタビュイー」は2文字だと区別が付かないため。
   const roleCell = document.createElement("div");
   roleCell.className = "role-cell";
   state.roles.forEach((role, ri) => {
     const b = document.createElement("button");
     b.className = "role-btn" + (seg.role === role ? " on" : "");
-    b.textContent = role;
+    const num = document.createElement("span");
+    num.className = "n";
+    num.textContent = String(ri + 1);
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = shortRole(role);
+    b.appendChild(num); b.appendChild(nm);
     if (seg.role === role) b.style.background = PALETTE[ri % PALETTE.length];
-    b.title = "キー " + (ri + 1);
+    b.title = role + "（キー " + (ri + 1) + "）";
     b.addEventListener("click", (e) => { e.stopPropagation(); assignRole(idx, seg.role === role ? null : role); });
     roleCell.appendChild(b);
   });
   row.appendChild(roleCell);
 
+  // 「辞書へ」は下の ops に入れるが、text の input ハンドラから触るので先に作る
+  const dictB = mkOp("辞書へ", "この修正を「誤→正」として置換辞書に登録する",
+                     () => registerFromRow(idx));
+  dictB.classList.add("to-dict");
+  dictB.hidden = seg.text === seg.original;   // 直した行にだけ出す
+
   const text = document.createElement("div");
-  text.className = "text" + (seg.text !== seg.original ? " edited" : "");
+  text.className = "text" + (seg.text !== seg.original ? " edited" : "")
+                          + (seg.unclear ? " unclear" : "");
+  if (seg.unclear) text.title = "話者の推定に迷いあり（2位と僅差）。聞いて確かめてください";
   text.contentEditable = "true";
   text.spellcheck = false;
   text.textContent = seg.text;
   text.addEventListener("focus", () => setActive(idx, false));
   text.addEventListener("input", () => {
     seg.text = text.textContent;
-    text.classList.toggle("edited", seg.text !== seg.original);
+    const changed = seg.text !== seg.original;
+    text.classList.toggle("edited", changed);
+    dictB.hidden = !changed;
     scheduleSave();
   });
   row.appendChild(text);
@@ -242,7 +260,7 @@ function buildSeg(seg, idx) {
   const mergeB = mkOp("↑結合", "上の行と結合", () => mergeUp(idx));
   const addB = mkOp("＋行", "この行の後に、聞き取れていない発話用の行を追加", () => insertSegAt(idx + 1));
   const delB = mkOp("削除", "この行を削除 (D)", () => deleteSeg(idx));
-  ops.appendChild(splitB); ops.appendChild(mergeB); ops.appendChild(addB); ops.appendChild(delB);
+  ops.appendChild(dictB); ops.appendChild(splitB); ops.appendChild(mergeB); ops.appendChild(addB); ops.appendChild(delB);
   row.appendChild(ops);
 
   row.addEventListener("mousedown", (e) => {
@@ -551,9 +569,13 @@ function togglePlay() {
 // ------------------------------------------------------------------ キーボード
 document.addEventListener("keydown", (e) => {
   if (!state) return;
-  // ロール名やテキスト編集中はショートカット無効（Escで抜ける）
-  const editing = document.activeElement && document.activeElement.isContentEditable;
-  if (editing) {
+  // IME で変換している最中のキーは横取りしない。日本語入力では
+  // 確定前のキーがそのまま飛んでくるため（「内田」の d など）。
+  if (e.isComposing || e.keyCode === 229) return;
+  // ダイアログを開いている間は本文の操作を止める
+  if (anyOverlayOpen()) return;
+  // 入力欄・テキスト編集中はショートカット無効（Escで抜ける）
+  if (isTyping()) {
     if (e.key === "Escape") document.activeElement.blur();
     return;
   }
@@ -619,3 +641,395 @@ $("resetBtn").addEventListener("click", async () => {
 
 // ------------------------------------------------------------------ 起動
 loadProjectList();
+
+// ------------------------------------------------------------------ 置換辞書
+// 「誤 → 正」の決定的な置換。モデルを上げても残る同音語・言い間違い・
+// 漢字の揺れを潰すためのもの。件数の上限は無い。
+let replacements = [];   // [{from, to}]
+
+/**
+ * 編集前後の文字列から、実際に変わった部分だけを取り出す。
+ * 「こちらケイト25歳です」→「内田圭人25歳です」なら {from:"こちらケイト", to:"内田圭人"}。
+ * 行まるごとを辞書に入れると再利用できないので、共通の前後を削って芯だけ残す。
+ */
+// 漢字・カタカナ・英数字は語を作る文字。ひらがなと記号は語の切れ目とみなす。
+const WORDY = /[\u4E00-\u9FFF\u3005\u30A1-\u30FA\u30FC0-9A-Za-z]/;
+
+function diffPair(before, after) {
+  if (!before || before === after) return null;
+  let head = 0;
+  while (head < before.length && head < after.length && before[head] === after[head]) head++;
+  let tail = 0;
+  while (tail < before.length - head && tail < after.length - head &&
+         before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
+
+  // 差分が1〜2文字だと規則が広すぎる。「小平倫太郎→小平凛太郎」を直しただけで
+  // 「倫→凛」を登録すると、無関係な「倫理」まで置換してしまう。
+  // そういうときだけ、前後の語のかたまりを巻き込むまで範囲を広げる。
+  if (before.slice(head, before.length - tail).length <= 2) {
+    while (head > 0 && WORDY.test(before[head - 1])) head--;
+    while (tail > 0 && WORDY.test(before[before.length - tail])) tail--;
+  }
+
+  const from = before.slice(head, before.length - tail);
+  const to = after.slice(head, after.length - tail);
+  if (!from) return null;                 // 追加しただけ（消すべき誤りが無い）
+  if (from.length > 30) return null;      // 長すぎるものは辞書に向かない
+  return { from, to };
+}
+
+async function loadReplacements() {
+  try {
+    const r = await fetch("/api/replacements");
+    const j = await r.json();
+    replacements = j.replacements || [];
+    $("replPath").textContent = j.path || "";
+  } catch (e) { replacements = []; }
+}
+
+function renderReplRows() {
+  const box = $("replRows");
+  box.innerHTML = "";
+  if (!replacements.length) {
+    const d = document.createElement("div");
+    d.className = "repl-empty";
+    d.textContent = "まだ登録がありません。行を編集して「辞書へ」を押すか、下の「＋ 行を追加」から登録します。";
+    box.appendChild(d);
+  }
+  replacements.forEach((rule, i) => {
+    const row = document.createElement("div");
+    row.className = "repl-row";
+
+    const from = document.createElement("input");
+    from.value = rule.from;
+    from.placeholder = "誤（文字起こしに出る形）";
+    from.addEventListener("input", () => { rule.from = from.value; });
+
+    const arrow = document.createElement("span");
+    arrow.className = "arrow";
+    arrow.textContent = "→";
+
+    const to = document.createElement("input");
+    to.value = rule.to;
+    to.placeholder = "正（置き換えたい形）";
+    to.addEventListener("input", () => { rule.to = to.value; });
+
+    const hit = document.createElement("span");
+    hit.className = "hit";
+    hit.textContent = state ? countHits(rule.from) : "";
+
+    const del = document.createElement("button");
+    del.textContent = "×";
+    del.title = "この行を削除";
+    del.addEventListener("click", () => { replacements.splice(i, 1); renderReplRows(); });
+
+    row.appendChild(from); row.appendChild(arrow); row.appendChild(to);
+    row.appendChild(hit); row.appendChild(del);
+    box.appendChild(row);
+  });
+  $("replCount").textContent = replacements.length + " 件";
+}
+
+/** いま開いている収録の中で、その語が何箇所あるか（適用前の目安） */
+function countHits(from) {
+  if (!from || !state) return "";
+  let n = 0;
+  for (const s of state.segments) {
+    if (!s.text) continue;
+    let i = 0;
+    while ((i = s.text.indexOf(from, i)) !== -1) { n++; i += from.length; }
+  }
+  return n ? n + "箇所" : "—";
+}
+
+function openRepl() {
+  renderReplRows();
+  $("replOverlay").hidden = false;
+}
+function closeRepl() { $("replOverlay").hidden = true; }
+
+async function saveReplacements() {
+  const res = await fetch("/api/replacements", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ replacements }),
+  });
+  const j = await res.json();
+  replacements = j.replacements || [];
+  renderReplRows();
+  toast("辞書を保存しました（" + replacements.length + "件）");
+}
+
+async function applyReplacements() {
+  if (!state) { toast("収録が選ばれていません"); return; }
+  await saveReplacements();                 // 編集中の内容を先に確定させる
+  if (!replacements.length) { toast("辞書が空です"); return; }
+  pushUndo("置換辞書の適用");               // ⌘Z で戻せるようにする
+  const res = await fetch("/api/apply-replacements?name=" + encodeURIComponent(state.name),
+                          { method: "POST" });
+  const j = await res.json();
+  if (j.error) { toast("適用に失敗しました"); undoStack.pop(); updateUndoBtn(); return; }
+  if (!j.applied) { toast("置換対象はありませんでした"); undoStack.pop(); updateUndoBtn(); return; }
+  state.segments = j.state.segments;
+  renderSegments();
+  setActive(Math.min(activeIdx, state.segments.length - 1));
+  renderReplRows();
+  const top = j.details.slice(0, 3).map((d) => d.from + "×" + d.count).join("、");
+  toast("置換 " + j.applied + "箇所 / " + j.segments + "行（" + top + "）");
+}
+
+/** 編集済みの行から「誤→正」を拾って辞書に足す */
+async function registerFromRow(idx) {
+  const seg = state.segments[idx];
+  const pair = diffPair(seg.original || "", seg.text || "");
+  if (!pair) { toast("辞書に入れられる差分がありません"); return; }
+  const dup = replacements.find((r) => r.from === pair.from);
+  if (dup) {
+    dup.to = pair.to;
+    toast("登録を更新: " + pair.from + " → " + pair.to);
+  } else {
+    replacements.push(pair);
+    toast("辞書に登録: " + pair.from + " → " + pair.to);
+  }
+  await saveReplacements();
+}
+
+$("replBtn").addEventListener("click", openRepl);
+$("replClose").addEventListener("click", closeRepl);
+$("replAdd").addEventListener("click", () => { replacements.push({ from: "", to: "" }); renderReplRows(); });
+$("replSave").addEventListener("click", saveReplacements);
+$("replApply").addEventListener("click", applyReplacements);
+$("replOverlay").addEventListener("click", (e) => { if (e.target.id === "replOverlay") closeRepl(); });
+// Escape はどのダイアログでも閉じる。手前（後から開いたもの）から順に。
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  for (const id of ["rolesOverlay", "diarOverlay", "replOverlay"]) {
+    if (!$(id).hidden) {
+      e.stopPropagation();
+      ({ rolesOverlay: closeRoles, diarOverlay: closeDiar, replOverlay: closeRepl })[id]();
+      return;
+    }
+  }
+}, true);
+
+loadReplacements();
+
+// ------------------------------------------------------------------ 話者の登録
+// ヘッダーのチップは表示専用にしてあるので、人数と名前の編集はすべてここで行う。
+// パネルは下書き（draftRoles）を編集し、「保存」を押して初めて state に反映する。
+let draftRoles = [];
+
+function syncSpeakerCount() {
+  if (!state) return;
+  $("speakerCount").value = String(Math.min(9, Math.max(2, state.roles.length)));
+}
+
+/** その名前が、話者分離のどのラベル（SPEAKER_00 など）だったか */
+function roleOrigin(name) {
+  const o = (state && state.origins) || {};
+  for (const label of Object.keys(o)) if (o[label] === name) return label;
+  return null;
+}
+
+/** その話者が今この収録の何行で使われているか */
+function roleUsage(role) {
+  if (!state || !role) return 0;
+  return state.segments.filter((s) => s.role === role).length;
+}
+
+function renderRolesRows() {
+  const box = $("rolesRows");
+  box.innerHTML = "";
+  draftRoles.forEach((role, i) => {
+    const row = document.createElement("div");
+    row.className = "repl-row";
+
+    const key = document.createElement("span");
+    key.className = "role-key";
+    key.textContent = String(i + 1);
+
+    const swatch = document.createElement("span");
+    swatch.className = "role-swatch";
+    swatch.style.background = PALETTE[i % PALETTE.length];
+
+    const input = document.createElement("input");
+    input.value = role;
+    input.placeholder = "話者の名前（例: インタビュアー）";
+    input.addEventListener("input", () => { draftRoles[i] = input.value; });
+
+    // 話者分離から来た話者は、元のラベルを添えて対応が追えるようにする。
+    // 照合は手動なので、あとから見直せることが大事。
+    const origin = document.createElement("span");
+    origin.className = "role-origin";
+    const label = roleOrigin(role);
+    origin.textContent = label || "";
+    origin.title = label ? "話者分離のラベル" : "";
+
+    const used = document.createElement("span");
+    used.className = "hit";
+    const n = roleUsage(role);
+    used.textContent = n ? n + "行" : "—";
+
+    const del = document.createElement("button");
+    del.textContent = "×";
+    del.title = "この話者を削除";
+    del.addEventListener("click", () => {
+      if (draftRoles.length <= 1) { toast("1人は必要です"); return; }
+      draftRoles.splice(i, 1);
+      renderRolesRows();
+    });
+
+    row.appendChild(key); row.appendChild(swatch); row.appendChild(input);
+    row.appendChild(origin); row.appendChild(used); row.appendChild(del);
+    box.appendChild(row);
+  });
+  $("rolesCount").textContent = draftRoles.length + "人";
+  $("speakerCount").value = String(Math.min(9, Math.max(2, draftRoles.length)));
+}
+
+function openRoles() {
+  if (!state) { toast("収録が選ばれていません"); return; }
+  draftRoles = state.roles.slice();
+  if (!draftRoles.length) draftRoles = DEFAULT_ROLE_NAMES.slice();
+  renderRolesRows();
+  $("rolesOverlay").hidden = false;
+}
+function closeRoles() { $("rolesOverlay").hidden = true; }
+
+/** 人数セレクタ: 下書きの長さを合わせるだけ。反映は「保存」で */
+function setDraftCount(n) {
+  while (draftRoles.length < n) draftRoles.push("話者" + (draftRoles.length + 1));
+  if (draftRoles.length > n) draftRoles = draftRoles.slice(0, n);
+  renderRolesRows();
+}
+
+function saveRoles() {
+  const next = draftRoles.map((r) => r.trim()).filter((r) => r);
+  if (!next.length) { toast("名前を1つ以上入れてください"); return; }
+  if (new Set(next).size !== next.length) { toast("同じ名前が複数あります"); return; }
+
+  const before = state.roles;
+  // 位置が同じものは「改名」とみなして、割り当て済みの行も追従させる
+  const renamed = {};
+  before.forEach((old, i) => { if (next[i] && next[i] !== old) renamed[old] = next[i]; });
+  // 消えた話者に割り当てられていた行は未設定に戻す
+  const gone = before.filter((r, i) => !next.includes(r) && !renamed[r]);
+  const lost = state.segments.filter((s) => gone.includes(s.role)).length;
+  if (lost && !confirm(gone.join("、") + " に割り当てられた " + lost +
+                       " 行が未設定に戻ります。よろしいですか？")) return;
+
+  // 元ラベルとの対応も改名に追従させる（照合の履歴を失わないため）
+  const origins = Object.assign({}, state.origins || {});
+  for (const label of Object.keys(origins)) {
+    if (renamed[origins[label]]) origins[label] = renamed[origins[label]];
+    else if (!next.includes(origins[label])) delete origins[label];
+  }
+  state.origins = origins;
+
+  state.roles = next;
+  state.segments.forEach((s) => {
+    if (!s.role) return;
+    if (renamed[s.role]) s.role = renamed[s.role];
+    else if (!next.includes(s.role)) s.role = null;
+  });
+  renderRoles(); renderSegments(); scheduleSave(); syncSpeakerCount();
+  closeRoles();
+  toast("話者を保存しました（" + next.length + "人）");
+}
+
+$("rolesBtn").addEventListener("click", openRoles);
+$("rolesClose").addEventListener("click", closeRoles);
+$("rolesAdd").addEventListener("click", () => {
+  if (draftRoles.length >= 9) { toast("9人までです"); return; }
+  draftRoles.push("話者" + (draftRoles.length + 1));
+  renderRolesRows();
+});
+$("rolesSave").addEventListener("click", saveRoles);
+$("rolesOverlay").addEventListener("click", (e) => { if (e.target.id === "rolesOverlay") closeRoles(); });
+$("speakerCount").addEventListener("change", (e) => setDraftCount(parseInt(e.target.value, 10)));
+
+// ------------------------------------------------------------------ 話者分離の取り込み
+let diarInfo = null;   // {found, file, spans, speakers}
+
+async function openDiar() {
+  if (!state) { toast("収録が選ばれていません"); return; }
+  const body = $("diarBody");
+  body.innerHTML = "";
+  $("diarNote").textContent = "";
+  $("diarFile").textContent = "";
+  $("diarOverlay").hidden = false;
+
+  const r = await fetch("/api/diarization?name=" + encodeURIComponent(state.name));
+  diarInfo = await r.json();
+  if (!diarInfo.found) {
+    body.innerHTML = '<div class="repl-empty">' +
+      '話者分離のファイルが見つかりません。<br>' +
+      '収録と同じ場所に <code>' + state.name + '.json</code>（WhisperX の出力）か ' +
+      '<code>' + state.name + '.rttm</code> を置いてください。</div>';
+    $("diarApply").disabled = true;
+    return;
+  }
+  $("diarApply").disabled = false;
+  $("diarFile").textContent = diarInfo.file + "（" + diarInfo.spans + "区間）";
+  // 検出された話者を並べるだけ。名前を付ける（人物との照合）のは
+  // 割り当てたあとの「話者を登録」で行う。場所を1つにしておく。
+  diarInfo.speakers.forEach((spk, i) => {
+    const row = document.createElement("div");
+    row.className = "repl-row";
+    const key = document.createElement("span");
+    key.className = "role-key";
+    key.textContent = String(i + 1);
+    const swatch = document.createElement("span");
+    swatch.className = "role-swatch";
+    swatch.style.background = PALETTE[i % PALETTE.length];
+    const label = document.createElement("span");
+    label.textContent = spk;
+    label.style.cssText = "flex:1;font-size:13px";
+    row.appendChild(key); row.appendChild(swatch); row.appendChild(label);
+    body.appendChild(row);
+  });
+  $("diarNote").textContent = diarInfo.speakers.length + "人を検出";
+}
+
+function closeDiar() { $("diarOverlay").hidden = true; }
+
+async function applyDiar() {
+  if (!state || !diarInfo || !diarInfo.found) return;
+  // 全行を振り直すので、手で直した割り当ては失われる。黙って消さない。
+  const assigned = state.segments.filter((s) => s.role).length;
+  if (assigned &&
+      !confirm("すでに " + assigned + " 行に話者が付いています。\n" +
+               "読み込み直すと全行が振り直され、手で直した分は失われます。\n" +
+               "（付けた話者の名前は引き継がれます。⌘Z で戻せます）\n\nよろしいですか？")) {
+    return;
+  }
+  pushUndo("話者の割り当て");           // ⌘Z で戻せるようにする
+  const res = await fetch("/api/apply-speakers?name=" + encodeURIComponent(state.name), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  const j = await res.json();
+  if (!j.ok) {
+    undoStack.pop(); updateUndoBtn();
+    toast(j.error === "no_file" ? "話者分離のファイルがありません" : "読み込めませんでした");
+    return;
+  }
+  state.roles = j.state.roles;
+  state.origins = j.state.origins || {};
+  state.segments = j.state.segments;
+  renderRoles(); renderSegments();
+  setActive(Math.min(activeIdx, state.segments.length - 1));
+  syncSpeakerCount();
+  closeDiar();
+  const kept = Object.keys(j.kept_names || {}).length;
+  toast("話者を割り当てました: " + j.assigned + "行 / 迷い " + j.unclear +
+        "行 / 対応なし " + j.unmatched + "行" +
+        (kept ? "（名前 " + kept + "件を引き継ぎ）" : ""));
+  openRoles();   // そのまま「誰がどの話者か」の照合へ進む
+}
+
+$("diarBtn").addEventListener("click", openDiar);
+$("diarClose").addEventListener("click", closeDiar);
+$("diarApply").addEventListener("click", applyDiar);
+$("diarOverlay").addEventListener("click", (e) => { if (e.target.id === "diarOverlay") closeDiar(); });
