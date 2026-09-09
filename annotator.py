@@ -21,6 +21,7 @@ faster-whisper で生成した `[開始s -> 終了s] テキスト` 形式のタ�
 """
 
 import argparse
+import bisect
 import json
 import os
 import re
@@ -78,7 +79,8 @@ class Store:
             name = fn[: -len("_timecoded.txt")]
             audio = self._find_audio(name)
             annot = os.path.exists(self._annot_path(name))
-            projects.append({"name": name, "audio": bool(audio), "annotated": annot})
+            projects.append({"name": name, "audio": bool(audio), "annotated": annot,
+                             "diarization": bool(self.find_diarization(name))})
         return projects
 
     def _find_audio(self, name):
@@ -138,12 +140,14 @@ class Store:
                 data = json.load(f)
             data.setdefault("roles", list(DEFAULT_ROLES))
             data.setdefault("options", {"merge": True, "timecodes": False})
+            data.setdefault("origins", {})
         else:
             if not os.path.exists(self._timecoded_path(name)):
                 return None
             data = {
                 "name": name,
                 "roles": list(DEFAULT_ROLES),
+                "origins": {},
                 "options": {"merge": True, "timecodes": False},
                 "segments": self.parse_timecoded(name),
             }
@@ -159,6 +163,7 @@ class Store:
         data = {
             "name": name,
             "roles": list(DEFAULT_ROLES),
+            "origins": {},
             "options": {"merge": True, "timecodes": False},
             "segments": self.parse_timecoded(name),
         }
@@ -173,6 +178,9 @@ class Store:
         payload = {
             "name": name,
             "roles": data.get("roles", list(DEFAULT_ROLES)),
+            # origins は「話者分離のラベル → 人に付けた名前」の対応。
+            # 名前を付けたあとも、どの SPEAKER_xx だったかを追えるように残す。
+            "origins": data.get("origins", {}),
             "options": data.get("options", {"merge": True, "timecodes": False}),
             "segments": data.get("segments", []),
         }
@@ -180,6 +188,146 @@ class Store:
             json.dump(payload, f, ensure_ascii=False, indent=1)
         os.replace(tmp, path)  # アトミック置換
         return True
+
+    # --- 話者分離の取り込み ------------------------------------------
+    # WhisperX の JSON か RTTM から「誰がいつ喋ったか」を読み、既存の行に
+    # 話者を割り当てる。日本語は分かち書きしないので WhisperX の words[] は
+    # 1文字ずつになり、文字単位の話者ラベルはバタついて使えない。そのため
+    # 行ごとに「重なった時間で重み付けした多数決」で1人に決める。
+
+    DIARIZATION_SUFFIXES = (".diarization.json", ".json", ".rttm")
+
+    def find_diarization(self, name):
+        """収録と同じ場所にある話者分離ファイルを探す。"""
+        for suffix in self.DIARIZATION_SUFFIXES:
+            path = os.path.join(self.data_dir, name + suffix)
+            if os.path.exists(path):
+                return path
+        return None
+
+    @staticmethod
+    def parse_rttm(path):
+        """RTTM → [(start, end, speaker), ...]"""
+        spans = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                # SPEAKER <file> <ch> <start> <dur> <NA> <NA> <speaker> <NA> <NA>
+                if len(parts) < 8 or parts[0].upper() != "SPEAKER":
+                    continue
+                try:
+                    start, dur = float(parts[3]), float(parts[4])
+                except ValueError:
+                    continue
+                spans.append((start, start + dur, parts[7]))
+        return spans
+
+    @staticmethod
+    def parse_whisperx(path):
+        """WhisperX JSON → [(start, end, speaker), ...]
+
+        word_segments（1文字ずつ）を優先し、無ければ segments を使う。
+        """
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return []
+        rows = data.get("word_segments") or []
+        if not any(r.get("speaker") for r in rows if isinstance(r, dict)):
+            rows = data.get("segments") or []
+        spans = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            spk = r.get("speaker")
+            start, end = r.get("start"), r.get("end")
+            if spk is None or start is None or end is None:
+                continue  # アライメントが付かなかった語は時刻が無い
+            try:
+                spans.append((float(start), float(end), str(spk)))
+            except (TypeError, ValueError):
+                continue
+        return spans
+
+    def load_diarization(self, path):
+        if path.lower().endswith(".rttm"):
+            return self.parse_rttm(path)
+        return self.parse_whisperx(path)
+
+    def apply_speakers(self, name, mapping=None, margin=0.6):
+        """話者分離ファイルを読み、各行に話者を割り当てる。
+
+        行 [start, end] に対し、話者ごとの「重なった時間」を合計し、最大の
+        話者を採る。最大が2位の margin 倍を超えない行は迷いありとして印を
+        付け、割り当ては行うが件数を返して人手確認を促す。
+        mapping は {"SPEAKER_00": "インタビュアー"} のような読み替え。
+        """
+        data = self.load_project(name)
+        if data is None:
+            return None
+        path = self.find_diarization(name)
+        if not path:
+            return {"error": "no_file"}
+        # 上書きされる手作業がどれだけあるか、呼び出し側に知らせる
+        had_roles = sum(1 for s in data["segments"] if s.get("role"))
+        spans = self.load_diarization(path)
+        if not spans:
+            return {"error": "empty", "path": path}
+
+        mapping = mapping or {}
+        speakers = sorted({spk for _, _, spk in spans})   # SPEAKER_00, 01, ... の順
+
+        # 前回この収録で SPEAKER_xx に付けた名前を引き継ぐ。引き継がないと、
+        # 読み込み直すたびに手でやった照合が SPEAKER_00 に戻ってしまう。
+        # 優先順位は「今回の指定 → 前回付けた名前 → 元のラベル」。
+        previous = data.get("origins") or {}
+        resolved = {spk: (mapping.get(spk) or previous.get(spk) or spk) for spk in speakers}
+
+        spans.sort(key=lambda x: x[0])
+        starts = [sp[0] for sp in spans]
+        # 区間は重なりうるので、開始位置だけでは走査の始点を決められない。
+        # 最長の区間ぶんだけ手前から見れば、重なる区間を取りこぼさない。
+        max_dur = max((b - a) for a, b, _ in spans)
+
+        assigned, unclear, unmatched = 0, 0, 0
+        for seg in data["segments"]:
+            s0, s1 = float(seg.get("start") or 0), float(seg.get("end") or 0)
+            if s1 <= s0:
+                unmatched += 1
+                continue
+            # 開始が行末より後になる位置まで走査すれば十分
+            overlap = {}
+            i = bisect.bisect_left(starts, s0 - max_dur)
+            while i < len(spans) and spans[i][0] < s1:
+                a, b, spk = spans[i]
+                dur = min(b, s1) - max(a, s0)
+                if dur > 0:
+                    overlap[spk] = overlap.get(spk, 0.0) + dur
+                i += 1
+            if not overlap:
+                seg["role"] = None
+                seg.pop("unclear", None)
+                unmatched += 1
+                continue
+            ranked = sorted(overlap.items(), key=lambda kv: -kv[1])
+            top, top_dur = ranked[0]
+            seg["role"] = resolved[top]
+            assigned += 1
+            if len(ranked) > 1 and ranked[1][1] > top_dur * margin:
+                seg["unclear"] = True   # 2位と僅差。人手で確認したい行
+                unclear += 1
+            else:
+                seg.pop("unclear", None)
+
+        # 全行を振り直すので、既存のロールは残さず話者分離の結果で置き換える。
+        # 残すと使われない「インタビュアー/インタビュイー」が並んで邪魔になる。
+        data["roles"] = [resolved[spk] for spk in speakers]
+        data["origins"] = resolved
+        self.save_project(name, data)
+        return {"path": os.path.basename(path), "speakers": speakers,
+                "assigned": assigned, "unclear": unclear, "unmatched": unmatched,
+                "kept_names": {k: v for k, v in resolved.items() if k != v},
+                "had_roles": had_roles, "state": self.load_project(name)}
 
     # --- 置換辞書 ----------------------------------------------------
     # 「誤 → 正」の決定的な置換。Whisper のモデルを上げても残る同音語・
@@ -434,6 +582,16 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/replacements":
             self._send_json({"replacements": self.store.load_replacements(),
                              "path": self.store.replacements_path})
+        elif path == "/api/diarization":
+            name = (qs.get("name") or [""])[0]
+            found = self.store.find_diarization(name) if self.store._safe(name) else None
+            if not found:
+                self._send_json({"found": False})
+            else:
+                spans = self.store.load_diarization(found)
+                self._send_json({"found": True, "file": os.path.basename(found),
+                                 "spans": len(spans),
+                                 "speakers": sorted({sp[2] for sp in spans})})
         elif path == "/api/project":
             name = (qs.get("name") or [""])[0]
             data = self.store.load_project(name)
@@ -475,6 +633,14 @@ class Handler(BaseHTTPRequestHandler):
             items = body.get("replacements") if isinstance(body, dict) else body
             saved = self.store.save_replacements(items)
             self._send_json({"ok": True, "replacements": saved})
+        elif path == "/api/apply-speakers":
+            body = self._read_body()
+            mapping = body.get("mapping") if isinstance(body, dict) else None
+            result = self.store.apply_speakers(name, mapping)
+            if result is None:
+                self._send_json({"error": "not found"}, 404)
+            else:
+                self._send_json({"ok": "error" not in result, **result})
         elif path == "/api/apply-replacements":
             result = self.store.apply_replacements(name)
             if result is None:
